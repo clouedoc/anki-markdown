@@ -86,10 +86,13 @@ class FakeMedia:
 class FakeModels:
     def __init__(self, model=None):
         self.model = model
+        self.models = {}
         self.saved = []
         self.added = []
 
-    def by_name(self, _name):
+    def by_name(self, name):
+        if name in self.models:
+            return self.models[name]
         return self.model
 
     def save(self, model):
@@ -111,7 +114,7 @@ class FakeModels:
         model["tmpls"].append(template)
 
     def add(self, model):
-        self.model = model
+        self.models[model["name"]] = model
         self.added.append(model)
 
 
@@ -156,6 +159,8 @@ def addon(monkeypatch, tmp_path):
     tpl.mkdir()
     (tpl / "front.html").write_text("<div>front</div>", encoding="utf-8")
     (tpl / "back.html").write_text("<div>back</div>", encoding="utf-8")
+    (tpl / "cloze_front.html").write_text("<div>cloze-front</div>", encoding="utf-8")
+    (tpl / "cloze_back.html").write_text("<div>cloze-back</div>", encoding="utf-8")
 
     media = FakeMedia(tmp_path / "media")
     media.path.mkdir()
@@ -251,6 +256,7 @@ class TestOnMungeHtml:
         assert addon.mod.on_munge_html(txt, FakeEditor(FakeNote(None))) == txt
         assert addon.mod.on_munge_html(txt, FakeEditor(FakeNote("Basic"))) == txt
         assert addon.mod.on_munge_html(txt, FakeEditor(FakeNote("Anki Markdown"))) == "**x**"
+        assert addon.mod.on_munge_html(txt, FakeEditor(FakeNote("Anki Markdown Cloze"))) == "**x**"
 
 
 class TestEnsureNotetype:
@@ -279,6 +285,36 @@ class TestEnsureNotetype:
         assert model["tmpls"][0]["name"] == "Default"
         assert model["tmpls"][0]["qfmt"].endswith("<div>front</div>")
         assert model["tmpls"][0]["afmt"].endswith("<div>back</div>")
+        assert model["css"] == addon.mod.DEFAULT_CSS
+
+
+class TestEnsureNotetypeCloze:
+    def test_updates_existing_model(self, addon):
+        model = {
+            "tmpls": [{"qfmt": "old-front", "afmt": "old-back"}],
+            "flds": [{"name": "Text"}, {"name": "Back Extra", "plainText": False}],
+        }
+        addon.models.model = model
+
+        addon.mod.ensure_notetype_cloze()
+
+        assert addon.models.saved == [model]
+        assert model["tmpls"][0]["qfmt"].endswith("<div>cloze-front</div>")
+        assert model["tmpls"][0]["afmt"].endswith("<div>cloze-back</div>")
+        assert all(field["plainText"] is True for field in model["flds"])
+
+    def test_creates_missing_model(self, addon):
+        addon.mod.ensure_notetype_cloze()
+
+        assert len(addon.models.added) == 1
+        model = addon.models.added[0]
+        assert model["name"] == "Anki Markdown Cloze"
+        assert model["type"] == 1  # MODEL_CLOZE
+        assert [field["name"] for field in model["flds"]] == ["Text", "Back Extra"]
+        assert all(field["plainText"] is True for field in model["flds"])
+        assert model["tmpls"][0]["name"] == "Cloze"
+        assert model["tmpls"][0]["qfmt"].endswith("<div>cloze-front</div>")
+        assert model["tmpls"][0]["afmt"].endswith("<div>cloze-back</div>")
         assert model["css"] == addon.mod.DEFAULT_CSS
 
 

@@ -10,6 +10,7 @@ from .settings import show_settings
 
 ADDON_DIR = Path(__file__).parent
 NOTETYPE = "Anki Markdown"
+NOTETYPE_CLOZE = "Anki Markdown Cloze"
 MENU = "Anki Markdown"
 
 
@@ -47,7 +48,7 @@ def on_munge_html(txt: str, editor: Editor) -> str:
     if not editor.note:
         return txt
     notetype = editor.note.note_type()
-    if not notetype or notetype["name"] != NOTETYPE:
+    if not notetype or notetype["name"] not in (NOTETYPE, NOTETYPE_CLOZE):
         return txt
     return html_to_markdown(txt)
 
@@ -66,8 +67,9 @@ def on_profile_loaded():
         )
     # Sync all media files to collection.media
     sync_media()
-    # Create/update note type with current config
+    # Create/update note types with current config
     ensure_notetype()
+    ensure_notetype_cloze()
     # Register web exports and settings action
     mw.addonManager.setWebExports(__name__, r"(web/.*|_.*)")
     mw.addonManager.setConfigAction(__name__, show_settings)
@@ -172,6 +174,36 @@ def ensure_notetype():
     mm.add(m)
 
 
+def ensure_notetype_cloze():
+    mm = mw.col.models
+    m = mm.by_name(NOTETYPE_CLOZE)
+
+    if m:
+        m["tmpls"][0]["qfmt"] = get_template("cloze_front.html")
+        m["tmpls"][0]["afmt"] = get_template("cloze_back.html")
+        for f in m["flds"]:
+            f["plainText"] = True
+        mm.save(m)
+        return
+
+    m = mm.new(NOTETYPE_CLOZE)
+    m["type"] = 1  # MODEL_CLOZE
+    m["css"] = DEFAULT_CSS
+    text = mm.new_field("Text")
+    text["plainText"] = True
+    mm.add_field(m, text)
+    extra = mm.new_field("Back Extra")
+    extra["plainText"] = True
+    mm.add_field(m, extra)
+
+    t = mm.new_template("Cloze")
+    t["qfmt"] = get_template("cloze_front.html")
+    t["afmt"] = get_template("cloze_back.html")
+    mm.add_template(m, t)
+
+    mm.add(m)
+
+
 def on_webview_set_content(content: WebContent, context):
     """Inject editor JS/CSS."""
     if isinstance(context, Editor):
@@ -185,7 +217,7 @@ def on_editor_load_note(editor: Editor):
     if not editor.note:
         return
     notetype = editor.note.note_type()
-    if notetype and notetype["name"] == NOTETYPE:
+    if notetype and notetype["name"] in (NOTETYPE, NOTETYPE_CLOZE):
         editor.web.eval("window.ankiMdActivate && ankiMdActivate()")
     else:
         editor.web.eval("window.ankiMdDeactivate && ankiMdDeactivate()")

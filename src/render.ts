@@ -14,6 +14,15 @@ import {
   transformerNotationFocus,
 } from "@shikijs/transformers";
 
+// Cloze support
+interface ClozeEntry {
+  content: string;
+  hidden: boolean;
+}
+let activeClozes: ClozeEntry[] = [];
+const CLOZE_RE =
+  /<span class=["']?cloze["']?[^>]*>([\s\S]*?)<\/span>/gi;
+
 // Config from inline JSON (injected by Python)
 interface Config {
   languages: string[];
@@ -196,6 +205,28 @@ function plain(code: string, name: string, meta?: string, pending = false) {
   return el.outerHTML;
 }
 
+/** Render a code block with cloze spans but no syntax highlighting. */
+function clozeCodeBlock(code: string, langName: string, meta?: string): string {
+  const parts = code.split(/(\uFFFD\d+\uFFFD)/);
+  const codeHtml = parts
+    .map((part) => {
+      const m = part.match(/^\uFFFD(\d+)\uFFFD$/);
+      if (m) {
+        const entry = activeClozes[+m[1]];
+        return `<span class="cloze">${md.utils.escapeHtml(entry?.content ?? "")}</span>`;
+      }
+      return md.utils.escapeHtml(part);
+    })
+    .join("");
+
+  const el = skeleton.cloneNode(true) as HTMLElement;
+  el.querySelector("code")!.innerHTML = codeHtml;
+  el.querySelector(".lang")!.textContent = langName;
+  if (meta) el.dataset.meta = meta;
+  el.removeAttribute("data-pending");
+  return el.outerHTML;
+}
+
 function highlight(code: string, name: string, meta?: string) {
   if (!highlighter) {
     return plain(code, name, meta, true);
@@ -233,8 +264,31 @@ md.renderer.rules.html_inline = (tokens, idx) =>
 md.renderer.rules.html_block = (tokens, idx) => sanitize(tokens[idx].content);
 md.renderer.rules.fence = (tokens, idx) => {
   const { content, info } = tokens[idx];
-  const [lang, ...rest] = info.split(/\s+/);
-  return highlight(content.trimEnd(), lang || "text", rest.join(" "));
+  const [langName, ...rest] = info.split(/\s+/);
+  const lang = langName || "text";
+  const meta = rest.join(" ");
+  const code = content.trimEnd();
+
+  // Check for cloze placeholders
+  if (!/\uFFFD\d+\uFFFD/.test(code)) {
+    return highlight(code, lang, meta);
+  }
+
+  // If any cloze in this block is hidden → plain text (front side)
+  const hasHidden = [...code.matchAll(/\uFFFD(\d+)\uFFFD/g)].some(
+    (m) => activeClozes[+m[1]]?.hidden,
+  );
+
+  if (hasHidden) {
+    return clozeCodeBlock(code, lang, meta);
+  }
+
+  // All revealed → substitute text, syntax highlight normally (back side)
+  const clean = code.replace(
+    /\uFFFD(\d+)\uFFFD/g,
+    (_, i) => activeClozes[+i]?.content ?? _,
+  );
+  return highlight(clean, lang, meta);
 };
 
 // Inline code: `code`{lang}
@@ -255,8 +309,7 @@ md.core.ruler.after("inline", "inline-code-lang", (state) => {
   }
 });
 
-md.renderer.rules.code_inline = (tokens, idx) => {
-  const { content, meta } = tokens[idx];
+function renderCodeInline(content: string, meta: { lang?: string } | undefined): string {
   const escaped = md.utils.escapeHtml(content);
   if (!meta?.lang) return `<code>${escaped}</code>`;
   if (!highlighter) return `<code data-pending data-lang="${md.utils.escapeHtml(meta.lang)}">${escaped}</code>`;
@@ -275,6 +328,42 @@ md.renderer.rules.code_inline = (tokens, idx) => {
     warn(meta.lang);
     return `<code>${escaped}</code>`;
   }
+}
+
+md.renderer.rules.code_inline = (tokens, idx) => {
+  const { content, meta } = tokens[idx];
+
+  // Check for cloze placeholders
+  if (/\uFFFD\d+\uFFFD/.test(content)) {
+    const hasHidden = [...content.matchAll(/\uFFFD(\d+)\uFFFD/g)].some(
+      (m) => activeClozes[+m[1]]?.hidden,
+    );
+
+    if (hasHidden) {
+      // Front: render with cloze markers, no syntax highlighting
+      const parts = content.split(/(\uFFFD\d+\uFFFD)/);
+      const html = parts
+        .map((part) => {
+          const m = part.match(/^\uFFFD(\d+)\uFFFD$/);
+          if (m) {
+            const entry = activeClozes[+m[1]];
+            return `<span class="cloze">${md.utils.escapeHtml(entry?.content ?? "")}</span>`;
+          }
+          return md.utils.escapeHtml(part);
+        })
+        .join("");
+      return `<code>${html}</code>`;
+    }
+
+    // Back: replace with answer text, render normally
+    const clean = content.replace(
+      /\uFFFD(\d+)\uFFFD/g,
+      (_, i) => activeClozes[+i]?.content ?? _,
+    );
+    return renderCodeInline(clean, meta);
+  }
+
+  return renderCodeInline(content, meta);
 };
 
 // Event delegation for toolbar
@@ -362,6 +451,35 @@ function upgrade(container: HTMLElement) {
   }
 }
 
+/** Render a single field: extract clozes, decode, markdown, restore. */
+function renderField(raw: string): string {
+  activeClozes = [];
+  const withPlaceholders = raw.replace(CLOZE_RE, (_, content: string) => {
+    const i = activeClozes.length;
+    const decoded = decode(content);
+    activeClozes.push({
+      content: decoded,
+      hidden: /^\[.*\]$/.test(decoded.trim()),
+    });
+    return `\uFFFD${i}\uFFFD`;
+  });
+
+  const decoded = decode(withPlaceholders);
+  let html = md.render(decoded);
+
+  // Restore remaining placeholders in inline text
+  if (activeClozes.length) {
+    html = html.replace(/\uFFFD(\d+)\uFFFD/g, (_, idx) => {
+      const entry = activeClozes[+idx];
+      if (!entry) return _;
+      return `<span class="cloze">${md.utils.escapeHtml(entry.content)}</span>`;
+    });
+  }
+
+  activeClozes = [];
+  return html;
+}
+
 /** Render front/back fields to card DOM. */
 export async function render(front: string, back: string) {
   const wrapper = document.querySelector(".anki-md-wrapper");
@@ -381,14 +499,12 @@ export async function render(front: string, back: string) {
 
   const frontEl = document.querySelector<HTMLElement>(".front");
   const backEl = document.querySelector<HTMLElement>(".back");
-  const frontText = decode(front);
-  const backText = decode(back);
 
   wrapper?.setAttribute("data-state", "loading");
   if (config.cardless) wrapper?.classList.add("cardless");
 
-  if (frontEl) frontEl.innerHTML = md.render(frontText);
-  if (backEl) backEl.innerHTML = md.render(backText);
+  if (frontEl) frontEl.innerHTML = renderField(front);
+  if (backEl) backEl.innerHTML = renderField(back);
   wrapper?.classList.add("ready");
 
   if (!highlighter) {
