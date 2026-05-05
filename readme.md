@@ -1,3 +1,9 @@
+# Anki Markdown Plus
+
+> This is my fork of [Anki Markdown](https://github.com/terkelg/anki-markdown) by [@terkelg](https://github.com/terkelg) (Terkel). You will find the original README.md below.
+
+---
+
 # Anki Markdown
 
 > Anki add-on for Markdown notes with syntax highlighting powered by [Shiki](https://shiki.style)
